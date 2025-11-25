@@ -1,0 +1,12 @@
+# Agentex Agent Manifest for Syllabi Insights RAG Agent
+# This file tells the Agentex backend how to start your agent
+# Docs: https://github.com/scaleapi/scale-agentex
+
+name: syllabi-insights-agent
+version: "1.0.0"
+description: "RAG-powered agent for extracting insights from academic syllabi documents"
+
+# Entry point - the acp.py file with your agent logic
+project:
+  path: project
+  entry_point: acp.py
