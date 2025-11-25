@@ -2,196 +2,157 @@
 
 A RAG-powered AI agent built with [Scale Agentex](https://github.com/scaleapi/scale-agentex) for extracting insights from academic syllabi documents.
 
-This agent uses:
-- **OpenAI GPT-4** for intelligent question answering with tool calling
-- **OpenAI Embeddings** (`text-embedding-3-small`) for semantic search
-- **ChromaDB** for vector storage and persistence
-- **Scale Agentex** for agent infrastructure, UI, and deployment
+## Features
 
-## What Agentex Provides
-
-Agentex is **not** just another SDK wrapper. It provides:
-
-1. **Agent Server** - Backend runtime with health monitoring via Docker
-2. **Developer UI** - Web interface at `localhost:3000` to test and debug your agent
-3. **Streaming Support** - Real-time response streaming out of the box
-4. **Traces & Observability** - Investigate agent behavior in the UI
-5. **Scalable Architecture** - Progress from L1 (chatbot) to L5 (autonomous) agents
+- **Semantic Search**: Query your syllabi using natural language
+- **OpenAI Vector Store**: Documents stored and indexed via OpenAI's hosted infrastructure
+- **GPT-4 Responses**: Intelligent answers with source citations
+- **Streaming**: Real-time response streaming
+- **Agentex UI**: Built-in web interface for testing and debugging
 
 ## Prerequisites
 
-```bash
-# Install Python 3.12+
-# https://www.python.org/downloads/
+Install these before running:
 
-# Install uv (fast Python package manager)
+```bash
+# Docker (required for Agentex backend)
+brew install docker docker-compose
+
+# Node.js (required for Agentex UI)
+brew install node
+
+# uv - Python package manager
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Install Docker and Node.js
-brew install docker docker-compose node
-
-# Stop redis (conflicts with Agentex's docker-compose)
-brew services stop redis
-
-# Install the Agentex CLI globally
+# Agentex CLI
 uv tool install agentex-sdk
 ```
 
-Verify installation:
+## Setup
+
+### 1. Configure Environment
+
 ```bash
-agentex -h
+# Copy the example env file
+cp .env.example .env
+
+# Edit .env and add your OpenAI API key
 ```
+
+### 2. Create Vector Store & Upload Syllabi
+
+1. Go to: https://platform.openai.com/storage/vector_stores
+2. Click **Create** to make a new vector store
+3. **Upload your syllabi files** (PDF, DOCX, TXT)
+4. Copy the vector store ID (starts with `vs_`)
+5. Add it to `.env`:
+   ```
+   OPENAI_VECTOR_STORE_ID=vs_your-id-here
+   ```
+
+### 3. Start Everything
+
+```bash
+./start.sh
+```
+
+This single command:
+- Stops conflicting local redis
+- Starts Agentex backend (Docker)
+- Starts Agentex UI (localhost:3000)
+- Starts your agent
+
+### 4. Open the UI
+
+Go to **http://localhost:3000** and select "syllabi-insights-agent"
+
+## Usage
+
+### Example Questions
+
+- "What files are in the vector store?"
+- "What are the prerequisites for CS 101?"
+- "When is the midterm exam?"
+- "Compare the grading policies across courses"
+- "What textbooks are required?"
+
+### Available Tools
+
+The agent has access to these tools:
+
+| Tool | Description |
+|------|-------------|
+| `search_syllabi` | Semantic search across uploaded syllabi |
+| `upload_syllabus` | Upload a new file to the vector store |
+| `get_index_stats` | Check vector store statistics |
+| `list_indexed_files` | List all indexed files |
 
 ## Project Structure
 
 ```
 syllabi-insights-agent/
+├── start.sh                # One-command startup script
 ├── manifest.yaml           # Agentex agent configuration
-├── pyproject.toml          # Python dependencies
-├── .env                    # Your API keys (create from .env.example)
+├── .env                    # Your API keys (not committed)
 ├── project/
-│   ├── acp.py              # Main agent entry point (streaming + tools)
+│   ├── acp.py              # Agent entry point (streaming + tools)
 │   └── lib/
-│       ├── vectorstore.py  # OpenAI embeddings + ChromaDB
-│       └── tools.py        # RAG tools for GPT-4 function calling
-└── data/
-    └── vectorstore/        # Persisted vector database (auto-created)
+│       ├── vectorstore.py  # OpenAI Vector Store integration
+│       └── tools.py        # Tool definitions for GPT-4
+└── infrastructure/         # Agentex backend + UI (cloned)
+    ├── agentex/            # Backend services (Docker)
+    └── agentex-ui/         # Web interface (React)
 ```
 
-## Quick Start
+## Manual Startup (Alternative)
 
-### 1. Clone the Agentex Repository
+If you prefer to run services separately:
 
-You need the Agentex backend server running locally:
-
+**Terminal 1 - Backend:**
 ```bash
-# Clone Scale Agentex
-git clone https://github.com/scaleapi/scale-agentex.git
-cd scale-agentex
-```
-
-### 2. Start the Agentex Backend (Terminal 1)
-
-```bash
-cd agentex/
+cd infrastructure/agentex
 uv venv && source .venv/bin/activate && uv sync
 make dev
 ```
 
-This starts the Agent Server via Docker. Use `lazydocker` in another terminal to monitor health.
-
-### 3. Start the Developer UI (Terminal 2)
-
+**Terminal 2 - UI:**
 ```bash
-cd agentex-ui/
-make install
-make dev
+cd infrastructure/agentex-ui
+npm install
+npm run dev
 ```
 
-The UI will be available at `http://localhost:3000`.
-
-### 4. Setup Your Agent (Terminal 3)
-
+**Terminal 3 - Agent:**
 ```bash
-cd syllabi-insights-agent/
-
-# Create virtual environment
 uv venv && source .venv/bin/activate && uv sync
-
-# Configure environment
-cp .env.example .env
-# Edit .env and add your OPENAI_API_KEY
-```
-
-### 5. Run Your Agent
-
-```bash
 agentex agents run --manifest manifest.yaml
 ```
 
-Your agent will appear in the Developer UI at `http://localhost:3000`.
+## Troubleshooting
 
-## Using the Agent
-
-### In the Developer UI
-
-1. Open `http://localhost:3000`
-2. Select "syllabi-insights-agent"
-3. Start chatting!
-
-### Example Conversations
-
-**Index a syllabus:**
-> "Index the syllabus at /path/to/cs101_syllabus.pdf"
-
-**Search for information:**
-> "What are the prerequisites for CS 101?"
-> "When is the midterm exam?"
-> "What textbooks are required?"
-
-**Compare courses:**
-> "Which courses cover machine learning?"
-> "Compare the grading policies between CS 101 and CS 201"
-
-**Get structured insights:**
-> "Give me a summary of the Data Structures course"
-
-## Agent Tools
-
-The agent has access to these tools (via OpenAI function calling):
-
-| Tool | Description |
-|------|-------------|
-| `search_syllabi` | Semantic search across indexed syllabi |
-| `index_syllabus` | Add a new PDF/DOCX/TXT syllabus to the index |
-| `get_course_insights` | Get structured info about a specific course |
-| `get_index_stats` | Check how many documents are indexed |
-
-## Configuration
-
-### Environment Variables
-
-Create a `.env` file at the project root:
-
+### Redis conflict
 ```bash
-# Required
-OPENAI_API_KEY=sk-your-key-here
-
-# Optional
-VECTORSTORE_PATH=./data/vectorstore
+brew services stop redis
 ```
 
-### manifest.yaml
+### Docker not running
+Make sure Docker Desktop is open and running.
 
-The manifest tells Agentex how to run your agent:
-
-```yaml
-name: syllabi-insights-agent
-version: "1.0.0"
-description: "RAG-powered agent for academic syllabi"
-
-project:
-  path: project
-  entry_point: acp.py
+### Services not healthy
+Wait 30-60 seconds after starting. Use `lazydocker` to monitor container health:
+```bash
+brew install lazydocker
+lazydocker
 ```
 
-## Next Steps
-
-Once you have the basic agent running, you can:
-
-1. **Add more tools** - Extend `lib/tools.py` with new capabilities
-2. **Make it agentic** - Switch to the async ACP pattern for complex workflows
-3. **Add sub-agents** - Use Agentex's Agent Developer Kit (ADK) for multi-agent systems
-4. **Go async with Temporal** - For long-running, durable workflows
-
-See the [Agentex Python SDK tutorials](https://github.com/scaleapi/scale-agentex-python) for more advanced examples.
+### Agent not appearing in UI
+Check that all Docker containers are healthy and the agent terminal shows no errors.
 
 ## Resources
 
-- [Scale Agentex GitHub](https://github.com/scaleapi/scale-agentex) - Main framework repo
-- [Agentex Python SDK](https://github.com/scaleapi/scale-agentex-python) - SDK with tutorials
-- [Agentex Blog Post](https://scale.com/blog/agentex) - Introduction and architecture
-- [OpenAI Embeddings](https://platform.openai.com/docs/guides/embeddings) - Embedding models
+- [Scale Agentex](https://github.com/scaleapi/scale-agentex)
+- [Agentex Python SDK](https://github.com/scaleapi/scale-agentex-python)
+- [OpenAI Vector Stores](https://platform.openai.com/docs/assistants/tools/file-search)
 
 ## License
 
