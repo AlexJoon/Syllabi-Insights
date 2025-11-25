@@ -8,6 +8,9 @@ set -e
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INFRA_DIR="$PROJECT_DIR/infrastructure"
 
+# Required for Agentex local development
+export ENVIRONMENT=development
+
 echo "=========================================="
 echo "  Syllabi Insights Agent - Startup"
 echo "=========================================="
@@ -65,14 +68,20 @@ start_backend() {
     if [ ! -d ".venv" ]; then
         echo "    Setting up Python environment..."
         uv venv
+        source .venv/bin/activate
+        uv sync
+    else
+        source .venv/bin/activate
     fi
 
-    source .venv/bin/activate
-    uv sync
+    # Start docker services using make dev (runs in background via docker-compose)
+    echo "    Starting Docker containers via 'make dev'..."
+    make dev &
+    BACKEND_PID=$!
 
-    # Start docker services in background
-    echo "    Starting Docker containers..."
-    docker-compose up -d
+    # Wait for services to be ready
+    echo "    Waiting for services to start..."
+    sleep 10
 
     echo "✅ Backend services starting (wait ~30s for healthy status)"
 }
@@ -140,8 +149,9 @@ cleanup() {
     echo ""
     echo "Shutting down services..."
     cd "$INFRA_DIR/agentex"
-    docker-compose down 2>/dev/null || true
+    make dev-stop 2>/dev/null || docker-compose down 2>/dev/null || true
     kill $UI_PID 2>/dev/null || true
+    kill $BACKEND_PID 2>/dev/null || true
     echo "Done."
 }
 
