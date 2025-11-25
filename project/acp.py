@@ -10,8 +10,12 @@ Run with: agentex agents run --manifest manifest.yaml
 """
 
 import os
+import json
+import uuid
 from pathlib import Path
-from typing import AsyncGenerator, List, Dict, Any
+from typing import AsyncGenerator, List, Dict, Any, Optional
+from datetime import datetime, UTC
+from contextlib import asynccontextmanager
 
 from dotenv import dotenv_values
 from openai import OpenAI
@@ -37,8 +41,64 @@ from .lib.tools import TOOLS, execute_tool
 # Initialize vector store (uses OPENAI_VECTOR_STORE_ID from .env)
 vectorstore = VectorStore()
 
-# Initialize Agentex client for fetching conversation history
+# Initialize Agentex client for fetching conversation history and tracing
 agentex_client = AsyncAgentex()
+
+
+@asynccontextmanager
+async def trace_span(
+    trace_id: str,
+    name: str,
+    input_data: Optional[Dict[str, Any]] = None,
+    parent_id: Optional[str] = None,
+    data: Optional[Dict[str, Any]] = None,
+):
+    """
+    Context manager for creating and managing observability spans.
+
+    Uses task_id as trace_id so spans appear in the UI traces sidebar.
+    Automatically handles span creation, timing, and completion.
+    """
+    span_id = str(uuid.uuid4())
+    start_time = datetime.now(UTC)
+
+    try:
+        # Create the span
+        span = await agentex_client.spans.create(
+            id=span_id,
+            name=name,
+            trace_id=trace_id,
+            start_time=start_time,
+            input=input_data,
+            parent_id=parent_id,
+            data=data,
+        )
+        yield span
+    except Exception as e:
+        print(f"[TRACE] Error creating span '{name}': {e}")
+        yield None
+        return
+
+    # Update span with end time on completion
+    try:
+        await agentex_client.spans.update(
+            span_id=span_id,
+            end_time=datetime.now(UTC),
+        )
+    except Exception as e:
+        print(f"[TRACE] Error updating span '{name}': {e}")
+
+
+async def update_span_output(span_id: str, output: Dict[str, Any]):
+    """Update a span with output data."""
+    try:
+        await agentex_client.spans.update(
+            span_id=span_id,
+            output=output,
+            end_time=datetime.now(UTC),
+        )
+    except Exception as e:
+        print(f"[TRACE] Error updating span output: {e}")
 
 
 async def get_conversation_history(task_id: str) -> List[Dict[str, Any]]:
@@ -108,12 +168,11 @@ async def handle_message(params: SendMessageParams) -> AsyncGenerator[TaskMessag
 
     This is the main entry point called by Agentex for processing messages.
     Uses streaming to send response chunks as they're generated.
+    Includes observability tracing for all major operations.
     """
     # Extract the user message from the params
-    # SendMessageParams has 'content' field which is a TaskMessageContent (TextContent, etc.)
     user_message = ""
     if params.content:
-        # TextContent has a 'content' field with the actual text
         if hasattr(params.content, 'content'):
             user_message = params.content.content
 
@@ -125,89 +184,156 @@ async def handle_message(params: SendMessageParams) -> AsyncGenerator[TaskMessag
         )
         return
 
-    # Get task ID for fetching conversation history
+    # Get task ID - used as trace_id for observability
     task_id = params.task.id
     print(f"[ACP] Processing message for task: {task_id}")
 
-    # Fetch conversation history from Agentex
-    conversation_history = await get_conversation_history(task_id)
-    print(f"[ACP] Found {len(conversation_history)} previous messages in conversation")
+    # Create root span for the entire message handling
+    async with trace_span(
+        trace_id=task_id,
+        name="handle_message",
+        input_data={"user_message": user_message[:500]},  # Truncate for readability
+        data={"task_id": task_id}
+    ) as root_span:
+        root_span_id = root_span.id if root_span else None
 
-    # Build message history with system prompt first
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        # Trace: Fetch conversation history
+        async with trace_span(
+            trace_id=task_id,
+            name="fetch_conversation_history",
+            parent_id=root_span_id,
+            data={"task_id": task_id}
+        ) as history_span:
+            conversation_history = await get_conversation_history(task_id)
+            if history_span:
+                await update_span_output(history_span.id, {
+                    "message_count": len(conversation_history)
+                })
+        print(f"[ACP] Found {len(conversation_history)} previous messages in conversation")
 
-    # Add conversation history (excludes system messages)
-    for msg in conversation_history:
-        if msg["role"] != "system":
-            messages.append(msg)
+        # Build message history with system prompt first
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        for msg in conversation_history:
+            if msg["role"] != "system":
+                messages.append(msg)
+        messages.append({"role": "user", "content": user_message})
+        print(f"[ACP] Total messages in context: {len(messages)}")
 
-    # Add the current user message
-    messages.append({"role": "user", "content": user_message})
+        # Trace: Initial LLM call (tool decision)
+        async with trace_span(
+            trace_id=task_id,
+            name="llm_tool_decision",
+            parent_id=root_span_id,
+            input_data={"model": "gpt-4o", "message_count": len(messages)},
+            data={"has_tools": True}
+        ) as llm_span:
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=messages,
+                tools=TOOLS,
+                tool_choice="auto",
+                stream=False,
+            )
+            assistant_message = response.choices[0].message
+            has_tool_calls = bool(assistant_message.tool_calls)
+            if llm_span:
+                await update_span_output(llm_span.id, {
+                    "has_tool_calls": has_tool_calls,
+                    "tool_count": len(assistant_message.tool_calls) if has_tool_calls else 0,
+                    "usage": {
+                        "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
+                        "completion_tokens": response.usage.completion_tokens if response.usage else 0
+                    }
+                })
 
-    print(f"[ACP] Total messages in context: {len(messages)}")
+        # If the model wants to use tools, execute them
+        if assistant_message.tool_calls:
+            print(f"[ACP] Model requested {len(assistant_message.tool_calls)} tool call(s)")
+            messages.append(assistant_message)
 
-    # First, check if we need to use tools
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=messages,
-        tools=TOOLS,
-        tool_choice="auto",
-        stream=False,
-    )
+            for tool_call in assistant_message.tool_calls:
+                tool_name = tool_call.function.name
+                tool_args = tool_call.function.arguments
+                print(f"[ACP] Executing tool: {tool_name} with args: {tool_args}")
 
-    assistant_message = response.choices[0].message
+                # Trace: Tool execution
+                async with trace_span(
+                    trace_id=task_id,
+                    name=f"tool:{tool_name}",
+                    parent_id=root_span_id,
+                    input_data={"tool": tool_name, "arguments": json.loads(tool_args) if tool_args else {}},
+                    data={"tool_call_id": tool_call.id}
+                ) as tool_span:
+                    result = await execute_tool(tool_name, tool_args, vectorstore)
+                    if tool_span:
+                        # Parse result and truncate if needed for display
+                        try:
+                            result_preview = json.loads(result)
+                            if isinstance(result_preview, dict) and "results" in result_preview:
+                                result_preview = {"result_count": len(result_preview.get("results", []))}
+                        except:
+                            result_preview = {"result_length": len(result)}
+                        await update_span_output(tool_span.id, result_preview)
 
-    # If the model wants to use tools, execute them
-    if assistant_message.tool_calls:
-        print(f"[ACP] Model requested {len(assistant_message.tool_calls)} tool call(s)")
-        messages.append(assistant_message)
+                print(f"[ACP] Tool result: {result[:200]}..." if len(result) > 200 else f"[ACP] Tool result: {result}")
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": result,
+                })
 
-        for tool_call in assistant_message.tool_calls:
-            tool_name = tool_call.function.name
-            tool_args = tool_call.function.arguments
-            print(f"[ACP] Executing tool: {tool_name} with args: {tool_args}")
-
-            # Execute the tool
-            result = await execute_tool(tool_name, tool_args, vectorstore)
-            print(f"[ACP] Tool result: {result[:200]}..." if len(result) > 200 else f"[ACP] Tool result: {result}")
-
-            # Add tool result to messages
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": result,
-            })
-
-        # Now stream the final response with tool results
-        stream = client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-            stream=True,
-        )
-
-        # index represents the content block, not the chunk number
-        # All deltas for the same text response should use index=0
-        for chunk in stream:
-            if chunk.choices[0].delta.content:
-                yield StreamTaskMessageDelta(
-                    type="delta",
-                    index=0,
-                    delta=TextDelta(type="text", text_delta=chunk.choices[0].delta.content)
+            # Trace: Final LLM response generation
+            async with trace_span(
+                trace_id=task_id,
+                name="llm_generate_response",
+                parent_id=root_span_id,
+                input_data={"model": "gpt-4o", "message_count": len(messages)},
+                data={"streaming": True, "with_tool_results": True}
+            ) as response_span:
+                stream = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=messages,
+                    stream=True,
                 )
-    else:
-        # No tools needed, stream directly
-        stream = client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-            stream=True,
-        )
-
-        # index represents the content block, not the chunk number
-        # All deltas for the same text response should use index=0
-        for chunk in stream:
-            if chunk.choices[0].delta.content:
-                yield StreamTaskMessageDelta(
-                    type="delta",
-                    index=0,
-                    delta=TextDelta(type="text", text_delta=chunk.choices[0].delta.content)
+                response_text = ""
+                for chunk in stream:
+                    if chunk.choices[0].delta.content:
+                        content = chunk.choices[0].delta.content
+                        response_text += content
+                        yield StreamTaskMessageDelta(
+                            type="delta",
+                            index=0,
+                            delta=TextDelta(type="text", text_delta=content)
+                        )
+                if response_span:
+                    await update_span_output(response_span.id, {
+                        "response_length": len(response_text)
+                    })
+        else:
+            # No tools needed - Trace: Direct LLM response
+            async with trace_span(
+                trace_id=task_id,
+                name="llm_generate_response",
+                parent_id=root_span_id,
+                input_data={"model": "gpt-4o", "message_count": len(messages)},
+                data={"streaming": True, "with_tool_results": False}
+            ) as response_span:
+                stream = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=messages,
+                    stream=True,
                 )
+                response_text = ""
+                for chunk in stream:
+                    if chunk.choices[0].delta.content:
+                        content = chunk.choices[0].delta.content
+                        response_text += content
+                        yield StreamTaskMessageDelta(
+                            type="delta",
+                            index=0,
+                            delta=TextDelta(type="text", text_delta=content)
+                        )
+                if response_span:
+                    await update_span_output(response_span.id, {
+                        "response_length": len(response_text)
+                    })
