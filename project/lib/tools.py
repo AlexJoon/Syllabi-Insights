@@ -109,7 +109,9 @@ async def _search_syllabi(
 ) -> str:
     """Search the syllabi using OpenAI's vector store."""
     try:
+        print(f"[TOOL] search_syllabi called with query: {query}")
         results = vectorstore.search(query=query, top_k=num_results)
+        print(f"[TOOL] search_syllabi results: {len(results) if results else 0} found")
 
         if not results:
             return json.dumps({

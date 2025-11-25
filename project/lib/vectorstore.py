@@ -5,8 +5,13 @@ Uses OpenAI's Vector Stores (from the Assistants API) for document
 storage and retrieval, allowing you to upload files via the dashboard.
 """
 
-import os
+from pathlib import Path
+from dotenv import dotenv_values
 from openai import OpenAI
+
+# Load environment variables directly from .env file
+env_path = Path(__file__).parent.parent.parent / ".env"
+env_vars = dotenv_values(env_path)
 
 
 class VectorStore:
@@ -28,8 +33,8 @@ class VectorStore:
         Args:
             vector_store_id: OpenAI Vector Store ID (vs_xxx) from dashboard
         """
-        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        self.vector_store_id = vector_store_id or os.getenv("OPENAI_VECTOR_STORE_ID")
+        self.client = OpenAI(api_key=env_vars.get("OPENAI_API_KEY"))
+        self.vector_store_id = vector_store_id or env_vars.get("OPENAI_VECTOR_STORE_ID")
 
         if not self.vector_store_id:
             print("Warning: OPENAI_VECTOR_STORE_ID not set. Creating a new vector store...")
@@ -88,7 +93,10 @@ class VectorStore:
         Returns:
             List of matching chunks with content and scores
         """
+        print(f"[VECTORSTORE] Searching with vector_store_id: {self.vector_store_id}")
+
         # Use the Responses API with file_search tool
+        # include=['file_search_call.results'] is required to get actual search results
         response = self.client.responses.create(
             model="gpt-4o",
             tools=[{
@@ -97,12 +105,17 @@ class VectorStore:
                 "max_num_results": top_k,
             }],
             input=f"Search for: {query}\n\nReturn the relevant excerpts from the documents.",
+            include=["file_search_call.results"],
         )
+
+        print(f"[VECTORSTORE] Response output count: {len(response.output)}")
 
         # Extract the file search results
         results = []
-        for output in response.output:
+        for i, output in enumerate(response.output):
+            print(f"[VECTORSTORE] Output {i}: type={output.type}")
             if output.type == "file_search_call":
+                print(f"[VECTORSTORE] file_search_call has {len(output.results) if output.results else 0} results")
                 for result in output.results or []:
                     results.append({
                         "content": result.text,

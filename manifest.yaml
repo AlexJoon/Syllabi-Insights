@@ -1,12 +1,27 @@
 # Agentex Agent Manifest for Syllabi Insights RAG Agent
-# This file tells the Agentex backend how to start your agent
 # Docs: https://github.com/scaleapi/scale-agentex
 
-name: syllabi-insights-agent
-version: "1.0.0"
-description: "RAG-powered agent for extracting insights from academic syllabi documents"
+# Build configuration (required for docker builds)
+build:
+  context:
+    root: "."
+    include_paths:
+      - "project"
+    dockerfile: "Dockerfile"
 
-# Entry point - the acp.py file with your agent logic
-project:
-  path: project
-  entry_point: acp.py
+# Agent configuration
+agent:
+  name: syllabi-insights-agent
+  acp_type: sync
+  description: "RAG-powered agent for extracting insights from academic syllabi documents"
+  env:
+    OPENAI_API_KEY: "${OPENAI_API_KEY}"
+    OPENAI_VECTOR_STORE_ID: "${OPENAI_VECTOR_STORE_ID}"
+
+# Local development configuration
+local_development:
+  agent:
+    port: 8000
+    host_address: "host.docker.internal"
+  paths:
+    acp: "project/acp.py"
